@@ -1,0 +1,174 @@
+---
+// OWLS pilot harness — the "marketing" page.
+//
+// This page plays the role gha-indie-worker.github.io plays in production:
+// the page a visitor lands on first, which prepares the application's bytes
+// before the visitor navigates to the application.
+//
+// Two differences from production, both deliberate:
+//   1. Intent preparation is ENABLED here unconditionally. In production it is
+//      opt-in behind PUBLIC_OWLS_INTENT. Proving the mechanism is this repo's job.
+//   2. The application page is same-ORIGIN (/app/), not a cross-origin
+//      subdomain. This test organization has exactly one Pages origin. See
+//      README.md, "What this does not prove".
+import { collectHints } from "../lib/prepare.mjs";
+
+const owlsHints = collectHints();
+const canonical = new URL(Astro.url.pathname, Astro.site ?? "https://gha-indie-worker-test.github.io");
+const intentPayload = JSON.stringify(owlsHints.intent);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="description" content="OWLS shared-WASM-loader pilot harness: entry page that prepares the application's bytes." />
+    <link rel="canonical" href={canonical} />
+    <!-- owls:hints:start -->
+    {/* Tier 1: declarative preparation. Identical mechanism to the production
+        site. These tags are the entire zero-JavaScript tier. */}
+    {owlsHints.origins.map((origin) => (
+      <Fragment>
+        <link rel="preconnect" href={origin} crossorigin="anonymous" />
+        <link rel="dns-prefetch" href={origin} />
+      </Fragment>
+    ))}
+    {owlsHints.links.map((hint) => (
+      <link
+        rel={hint.rel}
+        href={hint.href}
+        as={hint.as}
+        crossorigin={hint.crossorigin}
+        referrerpolicy={hint.referrerpolicy}
+      />
+    ))}
+    <!-- owls:hints:end -->
+    <title>OWLS pilot harness — entry</title>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">OWLS PILOT HARNESS · gha-indie-worker-test</p>
+      <h1>Entry page</h1>
+      <p class="lede">
+        This page prepares the pilot application's WebAssembly module. It never
+        compiles it, never instantiates it, and never runs it. Activation
+        happens on the application page.
+      </p>
+
+      <section aria-labelledby="tier1">
+        <h2 id="tier1">Tier 1 — declarative hints (zero JavaScript)</h2>
+        {owlsHints.links.length === 0 ? (
+          <p class="warn">
+            No manifest requested preparation, so no hints were emitted. If you
+            see this, <code>public/releases/pilot.json</code> is missing or its
+            asset origin is not on this site's allowlist.
+          </p>
+        ) : (
+          <ul class="hints">
+            {owlsHints.origins.map((origin) => (
+              <li><code>&lt;link rel="preconnect" href="{origin}" crossorigin="anonymous"&gt;</code></li>
+            ))}
+            {owlsHints.links.map((hint) => (
+              <li><code>&lt;link rel="{hint.rel}" href="{hint.href}" as="{hint.as}" crossorigin="anonymous" referrerpolicy="no-referrer"&gt;</code></li>
+            ))}
+          </ul>
+        )}
+        <p class="note">
+          These are hints. A browser may ignore <code>prefetch</code> entirely,
+          and this page cannot tell whether it did.
+        </p>
+      </section>
+
+      <section aria-labelledby="tier2">
+        <h2 id="tier2">Tier 2 — intent preparation (JavaScript, enabled here)</h2>
+        <p>
+          Hovering, focusing or touching the link below starts a credential-free
+          CORS <code>fetch</code> of the module, under a byte budget, an
+          <code>AbortController</code> deadline, and a
+          <code>navigator.connection.saveData</code> guard. The bytes are read to
+          completion and discarded. Nothing is compiled or instantiated here.
+        </p>
+        <p id="intent-status" class="status" role="status">Waiting for intent…</p>
+        <p class="cta">
+          <a id="app-link" href="/app/">Open the application page →</a>
+        </p>
+        <p class="note">
+          Open DevTools → Network before hovering, then follow the link and
+          compare against the numbers the application page reports.
+        </p>
+      </section>
+
+      <section aria-labelledby="scenarios">
+        <h2 id="scenarios">Running the four scenarios</h2>
+        <ol>
+          <li><strong>Cold entry.</strong> New tab (or cleared cache) → go straight to <code>/app/</code> without visiting this page.</li>
+          <li><strong>Prefetched entry.</strong> New tab → load this page → hover the link, wait for "prepared" → follow the link.</li>
+          <li><strong>Repeat entry.</strong> From the application page, go back and forward to <code>/app/</code> again.</li>
+          <li><strong>Same-document activation.</strong> On the application page, press "Activate again" without navigating.</li>
+        </ol>
+        <p class="note">
+          The application page labels each run. The label is what the harness
+          did; <code>transferSize</code> is the browser's own signal. Read them
+          together.
+        </p>
+      </section>
+    </main>
+
+    <script type="application/json" id="owls-intent-data" set:html={intentPayload} />
+    <script>
+      import { attach } from "../lib/intent.mjs";
+      import { recordPreparation } from "../lib/measure.mjs";
+
+      const status = document.getElementById("intent-status");
+      const node = document.getElementById("owls-intent-data");
+      let descriptors = [];
+      try {
+        descriptors = JSON.parse(node?.textContent ?? "[]");
+      } catch {
+        descriptors = [];
+      }
+
+      if (descriptors.length === 0) {
+        if (status) status.textContent = "Nothing to prepare: no manifest asset was marked prepare:true.";
+      } else {
+        attach(descriptors, {
+          onBegin: (urls) => {
+            for (const u of urls) recordPreparation(u.href);
+            if (status) {
+              status.textContent =
+                `Preparation started for ${urls.length} asset(s). ` +
+                "Bytes are fetched and discarded; nothing is compiled here.";
+            }
+          },
+        });
+        if (status) status.textContent = "Ready. Hover or focus the link below to start preparation.";
+      }
+    </script>
+
+    <style>
+      :global(html) { background: #0e1317; color-scheme: dark; }
+      :global(body) {
+        margin: 0; background: #0e1317; color: #e8eef2;
+        font: 16px/1.65 "Avenir Next", Avenir, "Segoe UI", system-ui, sans-serif;
+      }
+      main { max-width: 62rem; margin: 0 auto; padding: clamp(2rem, 6vw, 5rem) 5vw; }
+      .eyebrow { margin: 0 0 1.5rem; color: #67c2a3; font: 700 .68rem/1.4 "SFMono-Regular", Consolas, monospace; letter-spacing: .12em; }
+      h1 { margin: 0 0 1rem; font-size: clamp(2rem, 5vw, 3.4rem); line-height: 1.05; letter-spacing: -.04em; }
+      h2 { margin: 3rem 0 .75rem; font-size: 1.15rem; letter-spacing: -.02em; }
+      .lede { max-width: 46rem; color: #93a0aa; font-size: 1.08rem; }
+      section { border-top: 1px solid #29343c; padding-top: .5rem; }
+      code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: .82em; }
+      .hints { list-style: none; margin: 0; padding: 0; }
+      .hints li { padding: .5rem .75rem; margin-bottom: .4rem; background: #131a20; border-left: 2px solid #67c2a3; overflow-x: auto; }
+      .note { color: #93a0aa; font-size: .9rem; }
+      .warn { padding: .75rem 1rem; background: #2a1d13; border-left: 2px solid #d08f4a; }
+      .status { padding: .6rem .9rem; background: #131a20; border-left: 2px solid #67c2a3; font-family: "SFMono-Regular", Consolas, monospace; font-size: .85rem; }
+      .cta a { display: inline-block; margin-top: .5rem; padding: .85rem 1.15rem; background: #e8eef2; color: #0e1317; text-decoration: none; font-weight: 650; }
+      .cta a:hover { background: #67c2a3; }
+      :global(:focus-visible) { outline: 3px solid #67c2a3; outline-offset: 4px; }
+      @media (prefers-reduced-motion: reduce) { :global(*) { transition: none !important; } }
+    </style>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "namespace_prefix": "gha-indie-worker-test",
+  "domain_suffix": "gha-indie-worker-test.github.io",
+  "service_account_prefix": "gha-indie-worker-test",
+  "storage_prefix": "test/owls-pilot/",
+  "outbound_send_enabled": false,
+  "outbound_rate_limit_per_minute": 0,
+  "production_connectivity_enabled": false,
+  "rationale": "OWLS shared-WASM-loader pilot harness. This repository builds a static Astro site and a 41-byte WebAssembly fixture. It has no credentials, no secrets, no service accounts, no database, no messaging provider, and no self-hosted runner. It never contacts the gha-indie-worker production organization, its repositories, its Pages origins, or any resource outside its own GitHub Pages site, so production_connectivity_enabled is false and outbound sending is disabled.",
+  "declared_http_hosts": {
+    "gha-indie-worker-test.github.io": "This repository's OWN GitHub Pages origin, and the only HTTP(S) host named anywhere in this repository. It appears in astro.config.mjs (canonical site URL) and in public/releases/pilot.json, where the OWLS release-v1 contract requires each asset to declare a canonical absolute https:// URL and therefore forbids a relative path or a synthetic .invalid host. The asset it names is the fixture this repository itself builds and publishes. It is a test-organization address, not a production one.",
+    "review_note": "The static isolation scanner rejects HTTP(S) hosts that are not .invalid/.test/.example or loopback. This host is neither synthetic nor production: it is the repository's own deploy target. If the scanner flags it, the correct remedy is a narrow, expiring, reviewed exception naming exactly this repository, exactly public/releases/pilot.json and astro.config.mjs, and exactly that rule -- not a change that would make the manifest describe an address the fixture is not served from."
+  }
+}

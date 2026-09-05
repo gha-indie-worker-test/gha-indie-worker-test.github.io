@@ -1,0 +1,228 @@
+---
+// OWLS pilot harness — the "application" page.
+//
+// This is where activation happens, and where the pilot's claims are either
+// demonstrated or falsified in the browser:
+//
+//   fetch -> verify sha256 with crypto.subtle -> WebAssembly.compile
+//         -> WebAssembly.instantiate -> call add(2,3) -> assert === 5
+//
+// The manifest is read at BUILD time so the page carries the expected digest and
+// byte length inline. That matters: the digest the page checks against comes
+// from the release manifest, not from the response it is checking.
+import { collectHints } from "../../lib/prepare.mjs";
+
+const { links } = collectHints();
+const entry = links[0] ?? null;
+
+// Re-read the manifest for the fields the hint descriptors deliberately omit
+// (bytes and sha256 are not part of a <link> descriptor, but activation needs
+// them). Resolved from the process working directory for the same reason
+// prepare.mjs is: Astro builds with the project root as cwd, whereas
+// import.meta.url can be relocated by the bundler.
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import process from "node:process";
+
+const manifestPath = path.resolve(process.cwd(), "public/releases/pilot.json");
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+const asset = manifest.assets.find((a) => a.id === manifest.entrypoint);
+if (!asset) throw new Error("pilot.json entrypoint names no asset");
+if (entry && entry.href !== asset.url) throw new Error("hint href and entrypoint URL disagree");
+
+const activation = JSON.stringify({
+  appId: manifest.appId,
+  release: manifest.release,
+  runtime: manifest.runtime,
+  url: asset.url,
+  bytes: asset.bytes,
+  sha256: asset.sha256,
+});
+
+const canonical = new URL(Astro.url.pathname, Astro.site ?? "https://gha-indie-worker-test.github.io");
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="generator" content={Astro.generator} />
+    <meta name="description" content="OWLS shared-WASM-loader pilot harness: application page that verifies, compiles, instantiates and calls the module." />
+    <link rel="canonical" href={canonical} />
+    <title>OWLS pilot harness — activation</title>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">OWLS PILOT HARNESS · ACTIVATION</p>
+      <h1>Application page</h1>
+      <p class="lede">
+        Fetches the module named by <code>public/releases/pilot.json</code>,
+        verifies its SHA-256 against the digest in that manifest, compiles it,
+        instantiates it, and calls <code>add(2, 3)</code>.
+      </p>
+
+      <p id="verdict" class="verdict pending" role="status">Activating…</p>
+
+      <section aria-labelledby="numbers">
+        <h2 id="numbers">This navigation</h2>
+        <div id="report">
+          <p class="note">Measuring…</p>
+        </div>
+      </section>
+
+      <section aria-labelledby="again">
+        <h2 id="again">Same-document activation</h2>
+        <p>
+          Re-runs the whole sequence without navigating. This is the one case
+          where a compiled <code>WebAssembly.Module</code> could legitimately be
+          reused from memory — so the harness deliberately does <em>not</em>
+          cache it, and re-derives everything, to keep the four scenarios
+          comparable.
+        </p>
+        <p>
+          <button id="again-button" type="button">Activate again (same document)</button>
+          <a class="back" href="/">← Back to the entry page</a>
+        </p>
+      </section>
+
+      <section aria-labelledby="reading">
+        <h2 id="reading">Reading these numbers honestly</h2>
+        <ul>
+          <li>The module is <strong>41 bytes</strong>. Every duration here is dominated by scheduling noise. They prove a step <em>ran</em>; they are not a performance result.</li>
+          <li><code>transferSize === 0</code> is a browser hint that the response did not come off the network. It is <strong>not</strong> proof of a CDN or edge hit — there is no CDN here.</li>
+          <li>Both harness pages are <strong>same-origin</strong>. The production case is same-site, cross-origin, which is a different and weaker guarantee. See <code>README.md</code>.</li>
+          <li>No baseline is stored or compared against anywhere. Nothing here has been benchmarked.</li>
+        </ul>
+      </section>
+    </main>
+
+    <script type="application/json" id="owls-activation" set:html={activation} />
+    <script>
+      import { classify, navigationType, resourceTiming, step, report } from "../../lib/measure.mjs";
+
+      const config = JSON.parse(document.getElementById("owls-activation").textContent);
+      const verdict = document.getElementById("verdict");
+      const target = document.getElementById("report");
+
+      const hex = (buffer) =>
+        [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+      async function activate({ sameDocument }) {
+        const scenario = classify({ sameDocument });
+        verdict.className = "verdict pending";
+        verdict.textContent = `Activating (${scenario})…`;
+        const started = performance.now();
+
+        try {
+          // 1. FETCH. Same request shape the entry page used, so a cache entry
+          //    created there is eligible for reuse here.
+          const [bytes, fetchMs] = await step("fetch", async () => {
+            const response = await fetch(config.url, {
+              credentials: "omit",
+              mode: "cors",
+              redirect: "error",
+              referrerPolicy: "no-referrer",
+            });
+            if (!response.ok) throw new Error(`fetch failed: HTTP ${response.status}`);
+            return new Uint8Array(await response.arrayBuffer());
+          });
+
+          if (bytes.byteLength !== config.bytes) {
+            throw new Error(`length mismatch: got ${bytes.byteLength}, manifest declares ${config.bytes}`);
+          }
+
+          // 2. VERIFY. The digest comes from the manifest, not the response.
+          const [digest, verifyMs] = await step("verify", async () =>
+            hex(await crypto.subtle.digest("SHA-256", bytes)),
+          );
+          const digestOk = digest === config.sha256;
+          if (!digestOk) {
+            throw new Error(`sha256 mismatch:\n  got      ${digest}\n  manifest ${config.sha256}`);
+          }
+
+          // 3. COMPILE. Only after the bytes are proven to be the declared ones.
+          const [module, compileMs] = await step("compile", () => WebAssembly.compile(bytes));
+
+          // 4. INSTANTIATE with explicit (here: empty) imports.
+          const [instance, instantiateMs] = await step("instantiate", () =>
+            WebAssembly.instantiate(module, {}),
+          );
+
+          // 5. CALL and assert.
+          const [result, callMs] = await step("call", async () => instance.exports.add(2, 3));
+          if (result !== 5) throw new Error(`add(2,3) returned ${result}, expected 5`);
+
+          const total = Math.round((performance.now() - started) * 1000) / 1000;
+
+          verdict.className = "verdict ok";
+          verdict.textContent =
+            `PASS — ${scenario}: verified ${bytes.byteLength} bytes against the manifest digest, ` +
+            `compiled, instantiated, add(2,3) = 5.`;
+
+          report(target, {
+            scenario,
+            navigationType: navigationType(),
+            url: config.url,
+            declaredBytes: config.bytes,
+            receivedBytes: bytes.byteLength,
+            digestOk,
+            result,
+            timings: {
+              fetch: fetchMs,
+              verify: verifyMs,
+              compile: compileMs,
+              instantiate: instantiateMs,
+              call: callMs,
+              total,
+            },
+            timing: resourceTiming(config.url),
+          });
+        } catch (error) {
+          verdict.className = "verdict fail";
+          verdict.textContent = `FAIL — ${scenario}: ${error.message}`;
+          target.replaceChildren(
+            Object.assign(document.createElement("pre"), { textContent: String(error.stack ?? error) }),
+          );
+          console.error("owls activation failed", error);
+        }
+      }
+
+      document.getElementById("again-button").addEventListener("click", () => {
+        activate({ sameDocument: true });
+      });
+
+      activate({ sameDocument: false });
+    </script>
+
+    <style>
+      :global(html) { background: #0e1317; color-scheme: dark; }
+      :global(body) {
+        margin: 0; background: #0e1317; color: #e8eef2;
+        font: 16px/1.65 "Avenir Next", Avenir, "Segoe UI", system-ui, sans-serif;
+      }
+      main { max-width: 62rem; margin: 0 auto; padding: clamp(2rem, 6vw, 5rem) 5vw; }
+      .eyebrow { margin: 0 0 1.5rem; color: #67c2a3; font: 700 .68rem/1.4 "SFMono-Regular", Consolas, monospace; letter-spacing: .12em; }
+      h1 { margin: 0 0 1rem; font-size: clamp(2rem, 5vw, 3.4rem); line-height: 1.05; letter-spacing: -.04em; }
+      h2 { margin: 3rem 0 .75rem; font-size: 1.15rem; letter-spacing: -.02em; }
+      .lede { max-width: 46rem; color: #93a0aa; font-size: 1.08rem; }
+      section { border-top: 1px solid #29343c; padding-top: .5rem; }
+      code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: .82em; }
+      .verdict { padding: .9rem 1.1rem; margin: 2rem 0; font-family: "SFMono-Regular", Consolas, monospace; font-size: .9rem; border-left: 3px solid #29343c; background: #131a20; }
+      .verdict.ok { border-left-color: #67c2a3; }
+      .verdict.fail { border-left-color: #e06c6c; background: #2a1517; }
+      .verdict.pending { border-left-color: #93a0aa; }
+      :global(#report table) { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+      :global(#report th), :global(#report td) { padding: .5rem .6rem; border-bottom: 1px solid #29343c; text-align: left; vertical-align: top; font-size: .87rem; }
+      :global(#report th) { width: 22rem; color: #93a0aa; font-weight: 500; }
+      :global(#report td) { font-family: "SFMono-Regular", Consolas, monospace; }
+      :global(#report .caveat), .note { color: #93a0aa; font-size: .85rem; }
+      pre { overflow-x: auto; padding: .8rem; background: #131a20; font-size: .82rem; }
+      button { padding: .8rem 1.1rem; background: #e8eef2; color: #0e1317; border: 0; font: inherit; font-weight: 650; cursor: pointer; }
+      button:hover { background: #67c2a3; }
+      .back { margin-left: 1.25rem; color: #93a0aa; font-size: .9rem; }
+      :global(:focus-visible) { outline: 3px solid #67c2a3; outline-offset: 4px; }
+      @media (prefers-reduced-motion: reduce) { :global(*) { transition: none !important; } }
+    </style>
+  </body>
+</html>
