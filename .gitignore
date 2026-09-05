@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.astro/
+
+# public/fixtures/add.wasm is NOT ignored. It is a committed, reproducible
+# artifact: tools/make-fixture.mjs regenerates it byte-for-byte, and
+# tools/verify-fixture.mjs proves it still matches public/releases/pilot.json.

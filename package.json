@@ -1,0 +1,19 @@
+{
+  "name": "@gha-indie-worker-test/owls-pilot-harness",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.22.1"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "fixture": "node tools/make-fixture.mjs",
+    "verify": "node tools/verify-fixture.mjs"
+  },
+  "dependencies": {
+    "astro": "7.2.9"
+  }
+}
