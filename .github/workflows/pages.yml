@@ -1,0 +1,133 @@
+name: pages
+
+# Structure copied from the production marketing site's workflow,
+# gha-indie-worker/gha-indie-worker.github.io : .github/workflows/pages.yml.
+#
+# EVERY action SHA below is copied VERBATIM from that file. None was invented,
+# and no action is used that does not already appear there. The trailing version
+# comments are reproduced exactly as they appear there too.
+#
+# Additions over the production workflow, all dependency-free and all placed
+# BEFORE `npm install` so a broken fixture fails without installing anything:
+#   * regenerate the fixture and prove the committed bytes are reproducible
+#   * verify the fixture's sha256/length against public/releases/pilot.json
+#   * validate every release manifest through the same code path the build uses
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22.22.1"
+
+      - name: Syntax-check the dependency-free modules
+        run: |
+          set -euo pipefail
+          node --check tools/make-fixture.mjs
+          node --check tools/verify-fixture.mjs
+          node --check src/lib/prepare.mjs
+          node --check src/lib/intent.mjs
+          node --check src/lib/measure.mjs
+          node --check tools/validate-releases.mjs
+          node --check astro.config.mjs
+
+      - name: Prove the committed fixture is reproducible
+        run: |
+          set -euo pipefail
+          node tools/make-fixture.mjs
+          if ! git diff --quiet -- public/fixtures/add.wasm; then
+            echo 'tools/make-fixture.mjs did not reproduce the committed fixture byte-for-byte' >&2
+            git diff --stat -- public/fixtures/add.wasm >&2
+            exit 1
+          fi
+
+      - name: Verify the fixture against the release manifest
+        run: node tools/verify-fixture.mjs
+
+      - name: Validate every release manifest
+        run: node tools/validate-releases.mjs
+
+      - name: Confirm the isolation manifest stays closed
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import json, sys
+          m = json.load(open(".github/test-org-isolation.json"))
+          for key, expected in (("production_connectivity_enabled", False), ("outbound_send_enabled", False)):
+              if m.get(key) is not expected:
+                  sys.exit(f"{key} must be {expected}, found {m.get(key)!r}")
+          print("isolation manifest is closed")
+          '
+
+      - name: Reject unresolved conflict markers
+        run: |
+          set -euo pipefail
+          if git grep -nE '^(<<<<<<< |=======$|>>>>>>> )' -- . ':!*.wasm'; then
+            echo 'unresolved conflict marker detected' >&2
+            exit 1
+          fi
+
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      # NOTE: this is `npm install`, not `npm ci`, because no package-lock.json
+      # is committed yet. The lockfile could not be generated where this pilot
+      # was authored (the npm registry was unreachable), and inventing one would
+      # have been a fabricated dependency tree. FIRST ACTION FOR A MAINTAINER:
+      # run `npm install` locally, commit the resulting package-lock.json, and
+      # change this line to `npm ci --ignore-scripts --no-audit --no-fund` to
+      # match the production workflow and get reproducible installs.
+      - run: npm install --ignore-scripts --no-audit --no-fund
+
+      - run: npm run build
+        env:
+          PUBLIC_SITE_URL: https://${{ github.repository_owner }}.github.io
+
+      - name: Prove the built output carries the hints and the fixture
+        run: |
+          set -euo pipefail
+          test -s dist/index.html
+          test -s dist/app/index.html
+          test -s dist/fixtures/add.wasm
+          test -s dist/releases/pilot.json
+          grep -Fq 'rel="prefetch"' dist/index.html
+          grep -Fq 'rel="preconnect"' dist/index.html
+          grep -Fq '/fixtures/add.wasm' dist/index.html
+          cmp public/fixtures/add.wasm dist/fixtures/add.wasm
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: dist
+
+  deploy:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
