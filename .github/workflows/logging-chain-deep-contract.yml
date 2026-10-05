@@ -1,0 +1,65 @@
+name: Deep logging chain contract
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/logging-chain-deep-contract.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  indie-worker-consumer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NEXT_LOGGERS_SHA: 5a2596ccb662baca6c1b27327683072da0803b31
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Fetch exact next-loggers source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init source
+          git -C source remote add origin https://github.com/ORESoftware/next-loggers.ts.git
+          git -C source fetch --no-tags --depth=1 origin "$NEXT_LOGGERS_SHA"
+          test "$(git -C source rev-parse FETCH_HEAD)" = "$NEXT_LOGGERS_SHA"
+          git -C source checkout --detach "$NEXT_LOGGERS_SHA"
+      - name: Build lint surface without lifecycle scripts
+        working-directory: source
+        run: npm ci --ignore-scripts && npx tsc -p tsconfig.build.json
+      - name: Exercise namespace, class, and object-property logger tracking
+        working-directory: source
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { Linter } from 'eslint';
+          import eslintPlugin from './dist/eslint-plugin.js';
+
+          const code = `
+            import * as logging from '@oresoftware/next-loggers/node';
+            const worker = {};
+            worker.logger = new logging.NodeLogger({ appName: 'indiebuild-worker' });
+            const routineId = 'ores-routine-IndieBuild_12345';
+            worker.logger.info('job dispatched')
+              .addTraceId('ores-trace-IndieBuild_12345')
+              .addRoutineId(routineId)
+              .send();
+            worker.logger.error('job failed');
+          `;
+          const linter = new Linter();
+          const messages = linter.verify(code, [{
+            languageOptions: { ecmaVersion: 'latest', sourceType: 'module' },
+            plugins: { 'next-loggers': eslintPlugin },
+            rules: { 'next-loggers/require-observability-chain': 'error' },
+          }]);
+          assert.equal(messages.length, 1, JSON.stringify(messages));
+          assert.match(messages[0].message, /\.send\(\)/);
+          assert.match(messages[0].message, /ores-trace/);
+          assert.match(messages[0].message, /routineId/);
+          NODE
